@@ -583,13 +583,14 @@ def main():
         return
 
     # 確保序號與 checkbox 欄位存在
-    if "序號" not in df.columns:
-        df.insert(0, "序號", "")
     if CHECK_COLUMN not in df.columns:
         df.insert(0, CHECK_COLUMN, "[ ]")
+    if "序號" not in df.columns:
+        checked_idx = df.columns.get_loc(CHECK_COLUMN)
+        df.insert(checked_idx + 1, "序號", "")
 
-    # 重新排序欄位：序號第一、Checked 第二
-    cols = ["序號", CHECK_COLUMN] + [
+    # 重新排序欄位：Checked 第一、序號第二
+    cols = [CHECK_COLUMN, "序號"] + [
         c for c in df.columns if c not in ("序號", CHECK_COLUMN)
     ]
     df = df[cols]

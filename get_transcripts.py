@@ -28,6 +28,7 @@ OUTPUT_PRICE_PER_M = os.getenv("OUTPUT_PRICE_PER_M", "0.40")  # 2026-01-15
 GEMINI_MEDIA_RESOLUTION_RAW = os.getenv("GEMINI_MEDIA_RESOLUTION", "")
 PROMPT_FILE = os.getenv("PROMPT_FILE", "prompt.txt")
 MERGE_LINES = os.getenv("MERGE_LINES", "1") == "1"
+RETRY_INDEX_RAW = os.getenv("RETRY_INDEX", "").strip()
 
 
 class FreeTierLimitError(RuntimeError):
@@ -241,6 +242,69 @@ def _merge_transcript_lines(text, soft_wrap=120, max_len=180):
     return "\n".join(output)
 
 
+def _build_part_header(part_num, start_idx, end_idx):
+    return (
+        f"# 易學基地頻道 影片逐字稿 Part {part_num}\n"
+        f"**範圍：影片 {start_idx:03d} - {end_idx:03d}**\n\n---\n\n"
+    )
+
+
+def _build_entry(index, title, url, transcript_text):
+    formatted = "\n".join([f"    > {line}" for line in transcript_text.splitlines()])
+    return (
+        f"## {index + 1}. {title}\n"
+        f"* **影片連結**: {url}\n"
+        "* **逐字稿**:\n"
+        f"{formatted}\n\n---\n\n"
+    )
+
+
+def _replace_entry_in_file(filename, header, url, entry):
+    if not os.path.exists(filename):
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(header)
+            f.write(entry)
+        return "created"
+
+    with open(filename, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    lines = content.splitlines(keepends=True)
+    url_line = f"* **影片連結**: {url}"
+    url_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == url_line:
+            url_idx = i
+            break
+
+    if url_idx is None:
+        if not content.endswith("\n"):
+            content += "\n"
+        content += entry
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(content)
+        return "appended"
+
+    start_idx = 0
+    for i in range(url_idx, -1, -1):
+        if lines[i].startswith("## "):
+            start_idx = i
+            break
+
+    end_idx = len(lines)
+    for i in range(url_idx, len(lines)):
+        if lines[i].strip() == "---":
+            end_idx = i + 1
+            if end_idx < len(lines) and not lines[end_idx].strip():
+                end_idx += 1
+            break
+
+    new_lines = lines[:start_idx] + entry.splitlines(keepends=True) + lines[end_idx:]
+    with open(filename, "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
+    return "replaced"
+
+
 def _call_gemini(session, url, prompt):
     endpoint = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -322,7 +386,7 @@ def _call_gemini_with_retry(session, url, prompt, max_retries=GEMINI_MAX_RETRIES
                     attempts=attempt,
                     timeout_retries=timeout_retries,
                 ) from e
-            sleep_time = min(60, 2 ** empty_retries)
+            sleep_time = 5
             print(
                 f"⚠️  API 空回應，{sleep_time}s 後重試 "
                 f"({empty_retries}/{EMPTY_RESPONSE_MAX_RETRIES})"
@@ -518,23 +582,18 @@ def main():
         print(f"讀取 CSV 失敗: {e}")
         return
 
-    # 確保 checkbox 欄位存在且在最前
+    # 確保序號與 checkbox 欄位存在
+    if "序號" not in df.columns:
+        df.insert(0, "序號", "")
     if CHECK_COLUMN not in df.columns:
         df.insert(0, CHECK_COLUMN, "[ ]")
-    else:
-        cols = [CHECK_COLUMN] + [c for c in df.columns if c != CHECK_COLUMN]
-        df = df[cols]
 
-    # 確保序號欄位在 URL 前面
-    if "URL" in df.columns:
-        if "序號" not in df.columns:
-            url_idx = df.columns.get_loc("URL")
-            df.insert(url_idx, "序號", "")
-        cols = [c for c in df.columns if c != "序號"]
-        url_idx = cols.index("URL")
-        cols.insert(url_idx, "序號")
-        df = df[cols]
-        df["序號"] = range(1, len(df) + 1)
+    # 重新排序欄位：序號第一、Checked 第二
+    cols = ["序號", CHECK_COLUMN] + [
+        c for c in df.columns if c not in ("序號", CHECK_COLUMN)
+    ]
+    df = df[cols]
+    df["序號"] = range(1, len(df) + 1)
 
     # 檢查必要欄位
     if 'Title' not in df.columns or 'URL' not in df.columns:
@@ -577,6 +636,217 @@ def main():
     total_cost = 0.0
     total_cost_known = True
     stop_reason = ""
+    retry_index = None
+
+    if RETRY_INDEX_RAW:
+        try:
+            retry_index = int(RETRY_INDEX_RAW)
+            if retry_index <= 0:
+                raise ValueError
+        except ValueError:
+            print("錯誤：RETRY_INDEX 必須是正整數。")
+            return
+
+    if retry_index is not None:
+        match = df[df["序號"] == retry_index]
+        if match.empty:
+            print(f"錯誤：找不到序號 {retry_index} 的影片。")
+            return
+        index = match.index[0]
+        row = match.iloc[0]
+        title = str(row["Title"]).strip()
+        url = str(row["URL"]).strip()
+        serial = row.get("序號", "")
+
+        part_num = (retry_index - 1) // batch_size + 1
+        part_start = (part_num - 1) * batch_size + 1
+        part_end = min(part_num * batch_size, total_videos)
+        filename = os.path.join(
+            output_dir, f"易學基地頻道_影片逐字稿_Part_{part_num}.md"
+        )
+        header = _build_part_header(part_num, part_start, part_end)
+
+        video_start = time.monotonic()
+        print(f"單支補跑：序號 {retry_index} - {title[:30]}...")
+        try:
+            transcript_text, stats = get_transcript_text(url, session)
+        except FreeTierLimitError as e:
+            stop_reason = str(e)
+            video_elapsed = int(time.monotonic() - video_start)
+            _write_log_row(
+                log_path,
+                {
+                    "工作階段ID": run_id,
+                    "層級": "影片",
+                    "開始時間": run_start,
+                    "結束時間": datetime.now().isoformat(timespec="seconds"),
+                    "耗時(秒)": video_elapsed,
+                    "影片序號": serial,
+                    "CSV行號": index + 1,
+                    "影片標題": title,
+                    "影片連結": url,
+                    "寫入檔名": filename,
+                    "完成狀態": "中斷",
+                    "使用Key類型": KEY_PROFILE,
+                    "中斷原因": stop_reason,
+                    "錯誤訊息": stop_reason,
+                    "輸入Token數": 0,
+                    "輸出Token數": 0,
+                    "總Token數": 0,
+                    "預估成本(USD)": "",
+                    "API呼叫次數": 0,
+                    "續寫次數": 0,
+                    "重試次數": 0,
+                    "Timeout重試次數": 0,
+                    "Finish原因": "",
+                    "模型名稱": GEMINI_MODEL,
+                    "媒體解析度": GEMINI_MEDIA_RESOLUTION,
+                    "最大輸出Token": GEMINI_MAX_OUTPUT_TOKENS,
+                    "超時秒數": GEMINI_TIMEOUT,
+                    "每次間隔秒數": SLEEP_BETWEEN_CALLS,
+                    "本次成功影片數": "",
+                    "本次失敗影片數": "",
+                    "本次總輸入Token": "",
+                    "本次總輸出Token": "",
+                    "本次總Token": "",
+                    "本次總預估成本(USD)": "",
+                },
+            )
+            print(f"⛔️ {stop_reason}")
+            stop_reason = stop_reason
+        else:
+            if MERGE_LINES and not transcript_text.startswith("["):
+                transcript_text = _merge_transcript_lines(transcript_text)
+
+            is_error = (
+                transcript_text.startswith("[無法獲取逐字稿")
+                or transcript_text.startswith("[錯誤")
+            )
+            input_tokens = stats.get("input_tokens", 0)
+            output_tokens = stats.get("output_tokens", 0)
+            video_total_tokens = stats.get("total_tokens", 0)
+            api_calls = stats.get("api_calls", 0)
+            continuations = stats.get("continuations", 0)
+            retries = stats.get("retries", 0)
+            timeout_retries = stats.get("timeout_retries", 0)
+            finish_reason = stats.get("finish_reason", "")
+            video_elapsed = int(time.monotonic() - video_start)
+            cost = _estimate_cost(input_tokens, output_tokens)
+
+            if not is_error:
+                entry = _build_entry(index, title, url, transcript_text)
+                action = _replace_entry_in_file(filename, header, url, entry)
+                df.at[index, CHECK_COLUMN] = "[x]"
+                df.to_csv(csv_file, index=False)
+                success_count += 1
+                total_input_tokens += input_tokens
+                total_output_tokens += output_tokens
+                total_tokens += video_total_tokens
+                if cost is None:
+                    total_cost_known = False
+                else:
+                    total_cost += cost
+                print(f"✅ 已更新 {filename} ({action})")
+            else:
+                fail_count += 1
+                print("⚠️  單支補跑失敗，未改寫原本內容")
+
+            _write_log_row(
+                log_path,
+                {
+                    "工作階段ID": run_id,
+                    "層級": "影片",
+                    "開始時間": run_start,
+                    "結束時間": datetime.now().isoformat(timespec="seconds"),
+                    "耗時(秒)": video_elapsed,
+                    "影片序號": serial,
+                    "CSV行號": index + 1,
+                    "影片標題": title,
+                    "影片連結": url,
+                    "寫入檔名": filename,
+                    "完成狀態": "成功" if not is_error else "失敗",
+                    "使用Key類型": KEY_PROFILE,
+                    "中斷原因": "",
+                    "錯誤訊息": "" if not is_error else transcript_text[:200],
+                    "輸入Token數": input_tokens,
+                    "輸出Token數": output_tokens,
+                    "總Token數": video_total_tokens,
+                    "預估成本(USD)": f"{cost:.6f}" if cost is not None else "",
+                    "API呼叫次數": api_calls,
+                    "續寫次數": continuations,
+                    "重試次數": retries,
+                    "Timeout重試次數": timeout_retries,
+                    "Finish原因": finish_reason,
+                    "模型名稱": GEMINI_MODEL,
+                    "媒體解析度": GEMINI_MEDIA_RESOLUTION,
+                    "最大輸出Token": GEMINI_MAX_OUTPUT_TOKENS,
+                    "超時秒數": GEMINI_TIMEOUT,
+                    "每次間隔秒數": SLEEP_BETWEEN_CALLS,
+                    "本次成功影片數": "",
+                    "本次失敗影片數": "",
+                    "本次總輸入Token": "",
+                    "本次總輸出Token": "",
+                    "本次總Token": "",
+                    "本次總預估成本(USD)": "",
+                },
+            )
+        elapsed = int(time.monotonic() - start_time)
+        hours = elapsed // 3600
+        minutes = (elapsed % 3600) // 60
+        seconds = elapsed % 60
+        if stop_reason:
+            print(f"\n⛔️ 已中斷：{stop_reason}")
+        else:
+            print("\n單支補跑完成！")
+        print(f"本次執行耗時：{hours}h {minutes}m {seconds}s")
+        print(f"本次輸入Token：{total_input_tokens}")
+        print(f"本次輸出Token：{total_output_tokens}")
+        print(f"本次總Token：{total_tokens}")
+        if total_cost_known:
+            print(f"本次預估成本(USD)：{total_cost:.6f}")
+        else:
+            print("本次預估成本(USD)：(未設定價格或缺少 token 資訊)")
+
+        _write_log_row(
+            log_path,
+            {
+                "工作階段ID": run_id,
+                "層級": "工作階段",
+                "開始時間": run_start,
+                "結束時間": datetime.now().isoformat(timespec="seconds"),
+                "耗時(秒)": elapsed,
+                "影片序號": "",
+                "CSV行號": "",
+                "影片標題": "",
+                "影片連結": "",
+                "寫入檔名": "",
+                "完成狀態": "中斷" if stop_reason else "完成",
+                "使用Key類型": KEY_PROFILE,
+                "中斷原因": stop_reason,
+                "錯誤訊息": stop_reason,
+                "輸入Token數": "",
+                "輸出Token數": "",
+                "總Token數": "",
+                "預估成本(USD)": "",
+                "API呼叫次數": "",
+                "續寫次數": "",
+                "重試次數": "",
+                "Timeout重試次數": "",
+                "Finish原因": "",
+                "模型名稱": GEMINI_MODEL,
+                "媒體解析度": GEMINI_MEDIA_RESOLUTION,
+                "最大輸出Token": GEMINI_MAX_OUTPUT_TOKENS,
+                "超時秒數": GEMINI_TIMEOUT,
+                "每次間隔秒數": SLEEP_BETWEEN_CALLS,
+                "本次成功影片數": success_count,
+                "本次失敗影片數": fail_count,
+                "本次總輸入Token": total_input_tokens,
+                "本次總輸出Token": total_output_tokens,
+                "本次總Token": total_tokens,
+                "本次總預估成本(USD)": f"{total_cost:.6f}" if total_cost_known else "",
+            },
+        )
+        return
 
     # 分批處理
     for i in range(0, total_videos, batch_size):

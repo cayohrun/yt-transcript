@@ -125,6 +125,7 @@ transcript/易學基地頻道_影片逐字稿_Part_1.md
 - `MAX_VIDEOS`（本次只跑 N 支未完成影片）
 - `CHECK_COLUMN`（預設：`Checked`）
 - `MERGE_LINES`（預設：`1`，合併短行讓格式更好看）
+- `RETRY_INDEX`（單支補跑，指定 CSV 的序號）
 - `LOG_DIR`（預設：`logs`）
 - `LOG_FILE`（預設：`run_log.csv`）
 - `INPUT_PRICE_PER_M`（每 1M token 輸入成本，預設：0.10）
@@ -158,6 +159,9 @@ GEMINI_KEY_PROFILE=free ./.venv/bin/python get_transcripts.py
 # 合併短行（讓格式更像 2.5-flash）
 MERGE_LINES=1 ./.venv/bin/python get_transcripts.py
 MERGE_LINES=0 ./.venv/bin/python get_transcripts.py
+
+# 單支補跑（用 CSV 的序號）
+RETRY_INDEX=82 ./.venv/bin/python get_transcripts.py
 
 # 超時秒數
 GEMINI_TIMEOUT=180 ./.venv/bin/python get_transcripts.py

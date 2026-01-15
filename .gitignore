@@ -1,0 +1,8 @@
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+.gemini_key*
+logs/
+transcript/
+測試-*.md

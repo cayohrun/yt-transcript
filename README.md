@@ -61,13 +61,13 @@ export GEMINI_KEY_PROFILE=paid   # 或 free
 ## 執行
 
 ```bash
-python3 get_transcripts.py
+./.venv/bin/python get_transcripts.py
 ```
 
 只處理接下來 10 支未完成的影片：
 
 ```bash
-MAX_VIDEOS=10 python3 get_transcripts.py
+MAX_VIDEOS=10 ./.venv/bin/python get_transcripts.py
 ```
 
 若不想啟用虛擬環境，可直接用專案內的 Python（適合無狀態 CLI）：
@@ -111,12 +111,13 @@ transcript/易學基地頻道_影片逐字稿_Part_1.md
 ## 設定（環境變數）
 
 - `GEMINI_API_KEY`（必填）
-- `GEMINI_KEY_PROFILE`（可選：`paid` / `free`，指定使用哪一把 key）
+- `GEMINI_KEY_PROFILE`（可選：`paid` / `free`）
 - `GEMINI_MODEL`（預設：`gemini-2.5-flash-lite`）
 - `GEMINI_MAX_OUTPUT_TOKENS`（預設：`8192`）
 - `GEMINI_MAX_CONTINUATIONS`（預設：`3`）
 - `GEMINI_TIMEOUT`（預設：`120` 秒）
 - `GEMINI_MAX_RETRIES`（預設：`5`）
+- `EMPTY_RESPONSE_MAX_RETRIES`（預設：`30`，空回應重試次數）
 - `RETRY_FOREVER_ON_TIMEOUT`（預設：`1`，超時就一直重試）
 - `GEMINI_SLEEP`（預設：`0.6` 秒）
 - `PROMPT_FILE`（預設：`prompt.txt`）
@@ -167,6 +168,9 @@ GEMINI_SLEEP=1.2 ./.venv/bin/python get_transcripts.py
 # 最多重試幾次（非超時）
 GEMINI_MAX_RETRIES=3 ./.venv/bin/python get_transcripts.py
 
+# 空回應最多重試幾次
+EMPTY_RESPONSE_MAX_RETRIES=30 ./.venv/bin/python get_transcripts.py
+
 # 超時是否無限重試（1=是, 0=否）
 RETRY_FOREVER_ON_TIMEOUT=0 ./.venv/bin/python get_transcripts.py
 
@@ -183,7 +187,7 @@ LOG_DIR=logs LOG_FILE=run_log.csv ./.venv/bin/python get_transcripts.py
 CHECK_COLUMN=Checked ./.venv/bin/python get_transcripts.py
 
 # 成本單價（依你的付費方案調整）
-INPUT_PRICE_PER_M=0.30 OUTPUT_PRICE_PER_M=2.50 ./.venv/bin/python get_transcripts.py
+INPUT_PRICE_PER_M=0.10 OUTPUT_PRICE_PER_M=0.40 ./.venv/bin/python get_transcripts.py
 ```
 
 ## 注意事項
@@ -195,16 +199,7 @@ INPUT_PRICE_PER_M=0.30 OUTPUT_PRICE_PER_M=2.50 ./.venv/bin/python get_transcript
 - 若要省成本，建議設定 `GEMINI_MEDIA_RESOLUTION=LOW`，通常可顯著降低影片輸入 token。
 - 未設定 `GEMINI_MEDIA_RESOLUTION` 時會走 API 預設 `MEDIA_RESOLUTION_UNSPECIFIED`（不是高/低）。
 - 若使用免費 key 遇到請求上限，腳本會中斷並顯示原因，同時寫入 log。
-
-## 最近新增功能（摘要）
-
-- 每支影片會記錄 input/output token 與預估成本，工作完成後會輸出本次總計。
-- 新增 `logs/run_log.csv`，紀錄工作階段與每支影片的 token、成本與耗時。
-- CSV 會自動新增「序號」欄位（位於 URL 前），方便核對進度。
-- 新增 `GEMINI_MEDIA_RESOLUTION`，可用 `LOW` 降低影片輸入 token。
-- 支援 `GEMINI_KEY_PROFILE` 切換付費/免費 key，免費上限會直接中斷並寫入 log。
-- key 檔名改為 `.gemini_key_paid` / `.gemini_key_free`（可用 `GEMINI_KEY_PROFILE` 指定）。
-- 新增 `MERGE_LINES`（預設開），自動合併短行改善格式。
+- 遇到 API 空回應會自動重試（預設 30 次），超過後會記錄並跳過該支。
 
 ## 成本估算（粗估）
 

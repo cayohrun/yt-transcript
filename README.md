@@ -204,6 +204,7 @@ INPUT_PRICE_PER_M=0.10 OUTPUT_PRICE_PER_M=0.40 ./.venv/bin/python get_transcript
 - 未設定 `GEMINI_MEDIA_RESOLUTION` 時會走 API 預設 `MEDIA_RESOLUTION_UNSPECIFIED`（不是高/低）。
 - 若使用免費 key 遇到請求上限，腳本會中斷並顯示原因，同時寫入 log。
 - 遇到 API 空回應會自動重試（預設 30 次），超過後會記錄並跳過該支。
+- 可用 Ctrl+C 中斷，腳本會盡量寫入工作階段 log 再退出（不保證所有情況）。 
 
 ## 成本估算（粗估）
 

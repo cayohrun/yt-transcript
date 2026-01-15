@@ -5,4 +5,5 @@ __pycache__/
 .gemini_key*
 logs/
 transcript/
+youtube_videos.csv
 測試-*.md

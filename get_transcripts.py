@@ -23,6 +23,8 @@ GEMINI_MAX_CONTINUATIONS = int(os.getenv("GEMINI_MAX_CONTINUATIONS", "3"))
 GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "120"))
 GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "5"))
 EMPTY_RESPONSE_MAX_RETRIES = int(os.getenv("EMPTY_RESPONSE_MAX_RETRIES", "30"))
+SERVER_ERROR_MAX_RETRIES = int(os.getenv("SERVER_ERROR_MAX_RETRIES", "10"))
+SERVER_ERROR_SLEEP = float(os.getenv("SERVER_ERROR_SLEEP", "5"))
 RETRY_FOREVER_ON_TIMEOUT = os.getenv("RETRY_FOREVER_ON_TIMEOUT", "1") == "1"
 SLEEP_BETWEEN_CALLS = float(os.getenv("GEMINI_SLEEP", "0.6"))
 OVERWRITE = os.getenv("OVERWRITE", "0") == "1"
@@ -47,6 +49,14 @@ class FreeTierLimitError(RuntimeError):
 class EmptyResponseError(RuntimeError):
     def __init__(self, message, attempts=0, timeout_retries=0):
         super().__init__(message)
+        self.attempts = attempts
+        self.timeout_retries = timeout_retries
+
+
+class ServerError(RuntimeError):
+    def __init__(self, message, status_code=500, attempts=0, timeout_retries=0):
+        super().__init__(message)
+        self.status_code = status_code
         self.attempts = attempts
         self.timeout_retries = timeout_retries
 
@@ -357,6 +367,11 @@ def _call_gemini(session, url, prompt):
             error_message, resp.status_code, error_status
         ):
             raise FreeTierLimitError(_format_free_tier_message(error_message))
+        if resp.status_code >= 500:
+            raise ServerError(
+                f"HTTP {resp.status_code}: {error_message[:300]}",
+                status_code=resp.status_code,
+            )
         raise RuntimeError(f"HTTP {resp.status_code}: {error_message[:300]}")
     data = resp.json()
     if "error" in data:
@@ -380,12 +395,29 @@ def _call_gemini_with_retry(session, url, prompt, max_retries=GEMINI_MAX_RETRIES
     attempt = 0
     timeout_retries = 0
     empty_retries = 0
+    server_retries = 0
     while True:
         try:
             text, finish_reason, usage = _call_gemini(session, url, prompt)
             return text, finish_reason, usage, attempt + 1, timeout_retries
         except FreeTierLimitError:
             raise
+        except ServerError as e:
+            attempt += 1
+            server_retries += 1
+            if server_retries >= SERVER_ERROR_MAX_RETRIES:
+                raise ServerError(
+                    f"{e} (retries={server_retries})",
+                    status_code=getattr(e, "status_code", 500),
+                    attempts=attempt,
+                    timeout_retries=timeout_retries,
+                ) from e
+            sleep_time = SERVER_ERROR_SLEEP
+            print(
+                f"⚠️  API 伺服器錯誤，{sleep_time}s 後重試 "
+                f"({server_retries}/{SERVER_ERROR_MAX_RETRIES})"
+            )
+            time.sleep(sleep_time)
         except EmptyResponseError as e:
             attempt += 1
             empty_retries += 1
@@ -466,6 +498,22 @@ def get_transcript_text(url, session):
             retries += max(0, attempts)
             timeout_retries += timeout_attempts
             return f"[無法獲取逐字稿：API 空回應，已重試{attempts}次後跳過]", {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+                "api_calls": api_calls,
+                "continuations": continuations,
+                "retries": retries,
+                "timeout_retries": timeout_retries,
+                "finish_reason": finish_reason,
+            }
+        except ServerError as e:
+            attempts = getattr(e, "attempts", 0)
+            timeout_attempts = getattr(e, "timeout_retries", 0)
+            api_calls += attempts
+            retries += max(0, attempts)
+            timeout_retries += timeout_attempts
+            return f"[無法獲取逐字稿：伺服器錯誤，已重試{attempts}次後跳過]", {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,

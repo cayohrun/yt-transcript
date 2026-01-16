@@ -118,6 +118,8 @@ transcript/易學基地頻道_影片逐字稿_Part_1.md
 - `GEMINI_TIMEOUT`（預設：`120` 秒）
 - `GEMINI_MAX_RETRIES`（預設：`5`）
 - `EMPTY_RESPONSE_MAX_RETRIES`（預設：`30`，空回應重試次數）
+- `SERVER_ERROR_MAX_RETRIES`（預設：`10`，HTTP 5xx 重試次數）
+- `SERVER_ERROR_SLEEP`（預設：`5` 秒）
 - `RETRY_FOREVER_ON_TIMEOUT`（預設：`1`，超時就一直重試）
 - `GEMINI_SLEEP`（預設：`0.6` 秒）
 - `PROMPT_FILE`（預設：`prompt.txt`）
@@ -175,6 +177,9 @@ GEMINI_MAX_RETRIES=3 ./.venv/bin/python get_transcripts.py
 # 空回應最多重試幾次
 EMPTY_RESPONSE_MAX_RETRIES=30 ./.venv/bin/python get_transcripts.py
 
+# HTTP 5xx 最多重試幾次（每次 5 秒）
+SERVER_ERROR_MAX_RETRIES=10 SERVER_ERROR_SLEEP=5 ./.venv/bin/python get_transcripts.py
+
 # 超時是否無限重試（1=是, 0=否）
 RETRY_FOREVER_ON_TIMEOUT=0 ./.venv/bin/python get_transcripts.py
 
@@ -204,6 +209,7 @@ INPUT_PRICE_PER_M=0.10 OUTPUT_PRICE_PER_M=0.40 ./.venv/bin/python get_transcript
 - 未設定 `GEMINI_MEDIA_RESOLUTION` 時會走 API 預設 `MEDIA_RESOLUTION_UNSPECIFIED`（不是高/低）。
 - 若使用免費 key 遇到請求上限，腳本會中斷並顯示原因，同時寫入 log。
 - 遇到 API 空回應會自動重試（預設 30 次），超過後會記錄並跳過該支。
+- 遇到 HTTP 5xx 會固定 5 秒重試（預設 10 次），超過後會記錄並跳過該支。
 - 可用 Ctrl+C 中斷，腳本會盡量寫入工作階段 log 再退出（不保證所有情況）。 
 
 ## 成本估算（粗估）

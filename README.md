@@ -4,7 +4,7 @@
 
 - `skills/yt-transcript/SKILL.md`
 
-技能本身只提供流程與規範，實際執行仍使用 repo 內的 `get_transcripts.py`。
+skill 內含可執行腳本：`scripts/get_transcripts.py`（與 repo 根目錄版本一致）。
 
 ## 安裝（四平台）
 
@@ -30,13 +30,26 @@
 - 專案：`<workspace>/.agent/skills/yt-transcript/`
 - 全域：`~/.gemini/antigravity/skills/yt-transcript/`
 
+## 需求
+
+- Python 3
+- 套件：`pandas`、`requests`
+
 ## 使用方式（技能內容）
 
 - 技能內容在：`skills/yt-transcript/SKILL.md`
-- 實際執行需在 repo 根目錄跑：
+- 執行腳本時，請在「要輸出結果的資料夾」執行：
 
 ```bash
-./.venv/bin/python get_transcripts.py
+./.venv/bin/python <skill-root>/scripts/get_transcripts.py
+```
+
+`<skill-root>` 指的是包含 `SKILL.md` 的資料夾。
+
+若在 repo 內執行，可用：
+
+```bash
+./.venv/bin/python ./skills/yt-transcript/scripts/get_transcripts.py
 ```
 
 ### API Key（不要用到他人的 key）
@@ -47,9 +60,8 @@
 export GEMINI_API_KEY="YOUR_KEY"
 ```
 
-- 或在 repo 根目錄放本機 key 檔（不提交）：
-  - `.gemini_key_paid`
-  - `.gemini_key_free`
+- 或在本機放 key 檔（不提交）：  
+  - `.gemini_key_paid` / `.gemini_key_free`（放在 `scripts/` 同一層）
 
 `.gemini_key*` 已在 `.gitignore`，不要 commit。
 
@@ -57,12 +69,12 @@ export GEMINI_API_KEY="YOUR_KEY"
 
 ```bash
 SOURCE_NAME="LLM" URLS="https://youtu.be/AAA https://youtu.be/BBB" \
-  ./.venv/bin/python get_transcripts.py
+  ./.venv/bin/python <skill-root>/scripts/get_transcripts.py
 ```
 
 ## 打包 `.skill`
 
-已提供 `.skill` 發佈檔：
+已提供 `.skill` 發佈檔（含 `scripts/`）：
 
 - `dist/yt-transcript.skill`
 - `yt-transcript.skill`（同一份副本，方便直接下載）

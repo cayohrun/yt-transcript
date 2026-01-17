@@ -12,8 +12,9 @@ license: MIT
 
 ## 前置條件
 
-- 這個 skill **只提供流程與操作**，實際執行使用 repo 內的 `get_transcripts.py`
-- 請先在 repo 內建好虛擬環境並安裝相依套件
+- 需要 Python 3 + 套件 `pandas`、`requests`
+- 腳本位於本 skill 內：`scripts/get_transcripts.py`
+- 腳本會在「目前工作目錄」建立 `transcript/`、`logs/` 等資料夾
 - 只支援公開影片（private / unlisted 不可用）
 
 ## 安全重點（不要用到使用者的 key）
@@ -21,17 +22,19 @@ license: MIT
 - **不要把 API key 寫進檔案或提交到 Git**
 - 請使用環境變數或本機 key 檔：
   - `GEMINI_API_KEY=...`（環境變數）
-  - `.gemini_key_paid` / `.gemini_key_free`（本機檔案，已在 `.gitignore`）
+  - `.gemini_key_paid` / `.gemini_key_free`（放在 `scripts/` 同一層）
 
 ## 最短流程（CSV 模式）
 
-1. 確認 `youtube_videos.csv` 有 `Title`、`URL`、`NotebookSource`
-2. 在 repo 根目錄執行：
-   - `./.venv/bin/python get_transcripts.py`
+`<skill-root>` 指的是包含本 `SKILL.md` 的資料夾。
+
+1. `cd` 到要輸出結果的資料夾（包含 `youtube_videos.csv`）  
+2. 執行：  
+   - `./.venv/bin/python <skill-root>/scripts/get_transcripts.py`
 
 ## 最短流程（直接貼 URL）
 
-- `SOURCE_NAME="LLM" URLS="https://youtu.be/AAA https://youtu.be/BBB" ./.venv/bin/python get_transcripts.py`
+- `SOURCE_NAME="LLM" URLS="https://youtu.be/AAA https://youtu.be/BBB" ./.venv/bin/python <skill-root>/scripts/get_transcripts.py`
 
 ## 輸入規則
 

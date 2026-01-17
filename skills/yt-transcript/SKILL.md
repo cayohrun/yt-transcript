@@ -31,7 +31,7 @@ license: MIT
 
 ## 最短流程（直接貼 URL）
 
-- `SOURCE_NAME="八字" URLS="https://youtu.be/AAA https://youtu.be/BBB" ./.venv/bin/python get_transcripts.py`
+- `SOURCE_NAME="LLM" URLS="https://youtu.be/AAA https://youtu.be/BBB" ./.venv/bin/python get_transcripts.py`
 
 ## 輸入規則
 

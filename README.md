@@ -56,7 +56,7 @@ export GEMINI_API_KEY="YOUR_KEY"
 ## 直接貼 URL（單支/多支）
 
 ```bash
-SOURCE_NAME="八字" URLS="https://youtu.be/AAA https://youtu.be/BBB" \
+SOURCE_NAME="LLM" URLS="https://youtu.be/AAA https://youtu.be/BBB" \
   ./.venv/bin/python get_transcripts.py
 ```
 

@@ -17,6 +17,8 @@ license: MIT. LICENSE.txt has complete terms
 - 腳本會在「目前工作目錄」建立 `transcript/`、`logs/` 等資料夾
 - 只支援公開影片（private / unlisted 不可用）
 
+完整設定、環境變數與進階用法請看 `reference.md`。
+
 ## 安全重點（不要用到使用者的 key）
 
 - **不要把 API key 寫進檔案或提交到 Git**

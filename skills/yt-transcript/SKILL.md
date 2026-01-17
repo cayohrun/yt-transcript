@@ -1,7 +1,7 @@
 ---
 name: yt-transcript
 description: 產生 YouTube 逐字稿並依 NotebookLM 來源上限自動合併/分檔，支援 CSV 與直接 URL，包含續跑/補跑與重試。適用於要把多支 YouTube 影片整理成 NotebookLM 來源檔的場景。
-license: MIT
+license: MIT. LICENSE.txt has complete terms
 ---
 
 # yt-transcript

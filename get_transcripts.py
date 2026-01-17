@@ -1,5 +1,6 @@
 import csv
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -27,7 +28,6 @@ SERVER_ERROR_MAX_RETRIES = int(os.getenv("SERVER_ERROR_MAX_RETRIES", "10"))
 SERVER_ERROR_SLEEP = float(os.getenv("SERVER_ERROR_SLEEP", "5"))
 RETRY_FOREVER_ON_TIMEOUT = os.getenv("RETRY_FOREVER_ON_TIMEOUT", "1") == "1"
 SLEEP_BETWEEN_CALLS = float(os.getenv("GEMINI_SLEEP", "0.6"))
-OVERWRITE = os.getenv("OVERWRITE", "0") == "1"
 MAX_VIDEOS = os.getenv("MAX_VIDEOS")
 CHECK_COLUMN = os.getenv("CHECK_COLUMN", "Checked")
 KEY_PROFILE_RAW = os.getenv("GEMINI_KEY_PROFILE", "").strip().lower()
@@ -40,6 +40,12 @@ GEMINI_MEDIA_RESOLUTION_RAW = os.getenv("GEMINI_MEDIA_RESOLUTION", "")
 PROMPT_FILE = os.getenv("PROMPT_FILE", "prompt.txt")
 MERGE_LINES = os.getenv("MERGE_LINES", "1") == "1"
 RETRY_INDEX_RAW = os.getenv("RETRY_INDEX", "").strip()
+NOTEBOOK_SOURCE_COLUMN = os.getenv("NOTEBOOK_SOURCE_COLUMN", "NotebookSource")
+SOURCE_NAME = os.getenv("SOURCE_NAME", "").strip()
+NOTEBOOKLM_MAX_WORDS = int(os.getenv("NOTEBOOKLM_MAX_WORDS", "500000"))
+NOTEBOOKLM_TARGET_RATIO = float(os.getenv("NOTEBOOKLM_TARGET_RATIO", "0.8"))
+URLS_RAW = os.getenv("URLS", "").strip()
+URLS_FILE = os.getenv("URLS_FILE", "").strip()
 
 
 class FreeTierLimitError(RuntimeError):
@@ -261,17 +267,150 @@ def _merge_transcript_lines(text, soft_wrap=120, max_len=180):
     return "\n".join(output)
 
 
-def _build_part_header(part_num, start_idx, end_idx):
-    return (
-        f"# 易學基地頻道 影片逐字稿 Part {part_num}\n"
-        f"**範圍：影片 {start_idx:03d} - {end_idx:03d}**\n\n---\n\n"
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*")
+
+
+def _estimate_word_count(text):
+    cjk_count = len(_CJK_RE.findall(text))
+    word_count = len(_WORD_RE.findall(text))
+    return cjk_count + word_count
+
+
+def _sanitize_source_name(name):
+    cleaned = str(name).strip().replace("/", "_").replace("\\", "_")
+    cleaned = cleaned.replace(os.sep, "_")
+    return cleaned or "source"
+
+
+def _parse_urls_from_text(text):
+    parts = re.split(r"[\s,]+", text.strip())
+    urls = []
+    for part in parts:
+        if not part:
+            continue
+        urls.append(part.strip())
+    return urls
+
+
+def _load_url_inputs():
+    urls = []
+    if URLS_FILE:
+        try:
+            with open(URLS_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        urls.append(line)
+        except FileNotFoundError:
+            print(f"錯誤：找不到 URLS_FILE={URLS_FILE}")
+            return []
+    if URLS_RAW:
+        urls.extend(_parse_urls_from_text(URLS_RAW))
+    seen = set()
+    ordered = []
+    for url in urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        ordered.append(url)
+    return ordered
+
+
+def _fetch_youtube_title(url, session):
+    try:
+        resp = session.get(
+            "https://www.youtube.com/oembed",
+            params={"url": url, "format": "json"},
+            timeout=10,
+        )
+        if resp.ok:
+            data = resp.json()
+            title = str(data.get("title", "")).strip()
+            if title:
+                return title
+    except Exception:
+        pass
+    return url
+
+
+def _build_source_header(source_name, part_num):
+    suffix = "" if part_num == 1 else f" Part {part_num}"
+    return f"# {source_name}{suffix}\n\n---\n\n"
+
+
+def _list_source_files(output_dir, base_name):
+    files = []
+    base_file = f"{base_name}.md"
+    base_path = os.path.join(output_dir, base_file)
+    if os.path.exists(base_path):
+        files.append((1, base_path))
+    part_re = re.compile(rf"^{re.escape(base_name)}_part(\\d+)\\.md$", re.IGNORECASE)
+    for name in os.listdir(output_dir):
+        match = part_re.match(name)
+        if match:
+            part_num = int(match.group(1))
+            files.append((part_num, os.path.join(output_dir, name)))
+    return sorted(files, key=lambda item: item[0])
+
+
+def _read_file_word_count(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return _estimate_word_count(f.read())
+    except FileNotFoundError:
+        return 0
+
+
+def _choose_source_file(output_dir, base_name, entry_words, file_counts, target_words):
+    files = _list_source_files(output_dir, base_name)
+    for part_num, path in files:
+        count = file_counts.get(path)
+        if count is None:
+            count = _read_file_word_count(path)
+            file_counts[path] = count
+        if count + entry_words <= target_words:
+            return path, part_num
+    next_part = 1 if not files else max(p for p, _ in files) + 1
+    filename = (
+        f"{base_name}.md"
+        if next_part == 1
+        else f"{base_name}_part{next_part}.md"
     )
+    path = os.path.join(output_dir, filename)
+    file_counts[path] = 0
+    return path, next_part
 
 
-def _build_entry(index, title, url, transcript_text):
+def _append_entry(filename, header, entry):
+    if not os.path.exists(filename):
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(header)
+            f.write(entry)
+        return "created"
+    with open(filename, "a", encoding="utf-8") as f:
+        f.write(entry)
+    return "appended"
+
+
+def _find_source_file_with_url(output_dir, base_name, url):
+    url_line = f"* **影片連結**: {url}"
+    for part_num, path in _list_source_files(output_dir, base_name):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip() == url_line:
+                        return path, part_num
+        except FileNotFoundError:
+            continue
+    return None, None
+
+
+def _build_entry(display_index, title, url, transcript_text):
+    index_prefix = f"{display_index}. " if display_index is not None else ""
     formatted = "\n".join([f"    > {line}" for line in transcript_text.splitlines()])
     return (
-        f"## {index + 1}. {title}\n"
+        f"## {index_prefix}{title}\n"
         f"* **影片連結**: {url}\n"
         "* **逐字稿**:\n"
         f"{formatted}\n\n---\n\n"
@@ -570,22 +709,51 @@ def get_transcript_text(url, session):
 
 def _is_checked(value):
     text = str(value).strip().lower()
-    return text in {"[x]", "x", "✓", "✔", "✅", "true", "1", "yes"}
+    return text in {"[x]", "x", "✓", "✔", "✅", "true", "1", "yes", "v", "△", "✖"}
 
 
 def _normalize_checkbox(value, checked):
+    text = str(value).strip()
+    if text in {"△", "✖"}:
+        return text
     if checked:
-        return "[x]"
-    return "[ ]" if not _is_checked(value) else "[x]"
+        return "✔"
+    return "[ ]" if not _is_checked(value) else "✔"
 
 
-def _load_done_urls(output_dir):
+def _is_error_text(text):
+    return text.startswith("[無法獲取逐字稿") or text.startswith("[錯誤")
+
+
+def _mark_from_result(transcript_text, finish_reason):
+    if _is_error_text(transcript_text):
+        return "✖", True
+    if finish_reason == "MAX_TOKENS":
+        return "△", False
+    return "✔", False
+
+
+def _is_source_filename(name, base_name):
+    if name == f"{base_name}.md":
+        return True
+    if name.startswith(f"{base_name}_part") and name.endswith(".md"):
+        return True
+    return False
+
+
+def _load_done_urls(output_dir, source_bases=None):
     done = set()
     if not os.path.isdir(output_dir):
         return done
+    base_set = None
+    if source_bases:
+        base_set = {_sanitize_source_name(name) for name in source_bases if name}
     for name in os.listdir(output_dir):
         if not name.endswith(".md"):
             continue
+        if base_set:
+            if not any(_is_source_filename(name, base) for base in base_set):
+                continue
         path = os.path.join(output_dir, name)
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -599,17 +767,6 @@ def _load_done_urls(output_dir):
     return done
 
 
-def _count_entries(path):
-    try:
-        count = 0
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("## "):
-                    count += 1
-        return count
-    except FileNotFoundError:
-        return 0
-
 def main():
     global STOP_REQUESTED
     STOP_REQUESTED = False
@@ -618,13 +775,10 @@ def main():
     start_time = time.monotonic()
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_start = datetime.now().isoformat(timespec="seconds")
-    csv_file = 'youtube_videos.csv'
-    output_dir = 'transcript'
+    csv_file = "youtube_videos.csv"
+    output_dir = "transcript"
     log_path = os.path.join(LOG_DIR, LOG_FILE)
-    
-    if not os.path.exists(csv_file):
-        print(f"錯誤：找不到 {csv_file}，請確認檔案在同一資料夾內。")
-        return
+
     if not GEMINI_API_KEY:
         print(
             "錯誤：請設定環境變數 GEMINI_API_KEY，"
@@ -632,44 +786,83 @@ def main():
         )
         print("可用 GEMINI_KEY_PROFILE=paid|free 指定使用哪一把 key。")
         return
+
     os.makedirs(output_dir, exist_ok=True)
 
-    print("正在讀取 CSV 檔案...")
-    try:
-        df = pd.read_csv(csv_file)
-        # 清理欄位名稱
-        df.columns = df.columns.str.strip()
-    except Exception as e:
-        print(f"讀取 CSV 失敗: {e}")
-        return
+    target_ratio = NOTEBOOKLM_TARGET_RATIO
+    if target_ratio <= 0 or target_ratio > 1:
+        target_ratio = 0.8
+    target_words = max(1, int(NOTEBOOKLM_MAX_WORDS * target_ratio))
 
-    # 確保序號與 checkbox 欄位存在
-    if CHECK_COLUMN not in df.columns:
-        df.insert(0, CHECK_COLUMN, "[ ]")
-    if "序號" not in df.columns:
-        checked_idx = df.columns.get_loc(CHECK_COLUMN)
-        df.insert(checked_idx + 1, "序號", "")
+    url_inputs = _load_url_inputs()
+    use_csv = not url_inputs
 
-    # 重新排序欄位：Checked 第一、序號第二
-    cols = [CHECK_COLUMN, "序號"] + [
-        c for c in df.columns if c not in ("序號", CHECK_COLUMN)
-    ]
-    df = df[cols]
-    df["序號"] = range(1, len(df) + 1)
+    session = requests.Session()
+    df = None
+    total_videos = 0
+    source_names = set()
 
-    # 檢查必要欄位
-    if 'Title' not in df.columns or 'URL' not in df.columns:
-        print("錯誤：CSV 必須包含 'Title' 和 'URL' 欄位。")
-        print(f"目前的欄位有: {df.columns.tolist()}")
-        return
+    if use_csv:
+        if not os.path.exists(csv_file):
+            print(f"錯誤：找不到 {csv_file}，請確認檔案在同一資料夾內。")
+            return
+        print("正在讀取 CSV 檔案...")
+        try:
+            df = pd.read_csv(csv_file)
+            df.columns = df.columns.str.strip()
+        except Exception as e:
+            print(f"讀取 CSV 失敗: {e}")
+            return
 
-    # 先根據已生成的檔案同步 checkbox
-    done_urls = _load_done_urls(output_dir)
-    for idx, row in df.iterrows():
-        url = str(row.get("URL", "")).strip()
-        checked = url in done_urls
-        df.at[idx, CHECK_COLUMN] = _normalize_checkbox(row[CHECK_COLUMN], checked)
-    df.to_csv(csv_file, index=False)
+        if CHECK_COLUMN not in df.columns:
+            df.insert(0, CHECK_COLUMN, "[ ]")
+        if "序號" not in df.columns:
+            checked_idx = df.columns.get_loc(CHECK_COLUMN)
+            df.insert(checked_idx + 1, "序號", "")
+
+        if "Title" not in df.columns or "URL" not in df.columns:
+            print("錯誤：CSV 必須包含 'Title' 和 'URL' 欄位。")
+            print(f"目前的欄位有: {df.columns.tolist()}")
+            return
+
+        if NOTEBOOK_SOURCE_COLUMN not in df.columns:
+            if not SOURCE_NAME:
+                print(f"錯誤：CSV 必須包含 '{NOTEBOOK_SOURCE_COLUMN}' 欄位。")
+                print("或改用 SOURCE_NAME 來指定來源名稱。")
+                return
+            url_idx = df.columns.get_loc("URL")
+            df.insert(url_idx + 1, NOTEBOOK_SOURCE_COLUMN, SOURCE_NAME)
+
+        df[NOTEBOOK_SOURCE_COLUMN] = df[NOTEBOOK_SOURCE_COLUMN].fillna("").astype(str)
+        if SOURCE_NAME:
+            df[NOTEBOOK_SOURCE_COLUMN] = df[NOTEBOOK_SOURCE_COLUMN].apply(
+                lambda v: v.strip() or SOURCE_NAME
+            )
+        if (df[NOTEBOOK_SOURCE_COLUMN].str.strip() == "").any():
+            print(f"錯誤：'{NOTEBOOK_SOURCE_COLUMN}' 欄位不可為空。")
+            return
+
+        cols = [CHECK_COLUMN, "序號"] + [
+            c for c in df.columns if c not in ("序號", CHECK_COLUMN)
+        ]
+        df = df[cols]
+        df["序號"] = range(1, len(df) + 1)
+
+        source_names = set(df[NOTEBOOK_SOURCE_COLUMN].tolist())
+        done_urls = _load_done_urls(output_dir, source_names)
+        for idx, row in df.iterrows():
+            url = str(row.get("URL", "")).strip()
+            checked = url in done_urls
+            df.at[idx, CHECK_COLUMN] = _normalize_checkbox(row[CHECK_COLUMN], checked)
+        df.to_csv(csv_file, index=False)
+        total_videos = len(df)
+    else:
+        if not SOURCE_NAME:
+            print("錯誤：URL 模式需要設定 SOURCE_NAME。")
+            return
+        source_names = {SOURCE_NAME}
+        done_urls = _load_done_urls(output_dir, source_names)
+        total_videos = len(url_inputs)
 
     max_new = None
     if MAX_VIDEOS:
@@ -680,15 +873,12 @@ def main():
         except ValueError:
             print("警告：MAX_VIDEOS 必須是整數，已忽略。")
 
-    # 設定批次大小
-    batch_size = 10
-    total_videos = len(df)
-    
     print(f"總共發現 {total_videos} 支影片。")
     print(f"使用模型：{GEMINI_MODEL}")
+    print(f"NotebookLM 每來源上限：{NOTEBOOKLM_MAX_WORDS} words")
+    print(f"目標使用上限：{target_words} words (約 {int(target_ratio*100)}%)")
     print("--------------------------------------------------")
 
-    session = requests.Session()
     processed_new = 0
     success_count = 0
     fail_count = 0
@@ -699,6 +889,7 @@ def main():
     total_cost_known = True
     stop_reason = ""
     retry_index = None
+    file_counts = {}
 
     if RETRY_INDEX_RAW:
         try:
@@ -710,6 +901,9 @@ def main():
             return
 
     if retry_index is not None:
+        if not use_csv:
+            print("錯誤：RETRY_INDEX 只能搭配 CSV 模式使用。")
+            return
         if STOP_REQUESTED:
             stop_reason = "使用者中斷（Ctrl+C）"
         else:
@@ -722,14 +916,12 @@ def main():
             title = str(row["Title"]).strip()
             url = str(row["URL"]).strip()
             serial = row.get("序號", "")
+            source_name = str(row.get(NOTEBOOK_SOURCE_COLUMN, "")).strip() or SOURCE_NAME
+            base_name = _sanitize_source_name(source_name)
 
-            part_num = (retry_index - 1) // batch_size + 1
-            part_start = (part_num - 1) * batch_size + 1
-            part_end = min(part_num * batch_size, total_videos)
-            filename = os.path.join(
-                output_dir, f"易學基地頻道_影片逐字稿_Part_{part_num}.md"
+            existing_path, existing_part = _find_source_file_with_url(
+                output_dir, base_name, url
             )
-            header = _build_part_header(part_num, part_start, part_end)
 
             video_start = time.monotonic()
             print(f"單支補跑：序號 {retry_index} - {title[:30]}...")
@@ -750,7 +942,7 @@ def main():
                         "CSV行號": index + 1,
                         "影片標題": title,
                         "影片連結": url,
-                        "寫入檔名": filename,
+                        "寫入檔名": existing_path or "",
                         "完成狀態": "中斷",
                         "使用Key類型": KEY_PROFILE,
                         "中斷原因": stop_reason,
@@ -782,10 +974,6 @@ def main():
                 if MERGE_LINES and not transcript_text.startswith("["):
                     transcript_text = _merge_transcript_lines(transcript_text)
 
-                is_error = (
-                    transcript_text.startswith("[無法獲取逐字稿")
-                    or transcript_text.startswith("[錯誤")
-                )
                 input_tokens = stats.get("input_tokens", 0)
                 output_tokens = stats.get("output_tokens", 0)
                 video_total_tokens = stats.get("total_tokens", 0)
@@ -796,12 +984,23 @@ def main():
                 finish_reason = stats.get("finish_reason", "")
                 video_elapsed = int(time.monotonic() - video_start)
                 cost = _estimate_cost(input_tokens, output_tokens)
+                mark, is_error = _mark_from_result(transcript_text, finish_reason)
 
                 if not is_error:
-                    entry = _build_entry(index, title, url, transcript_text)
+                    display_index = int(serial) if str(serial).isdigit() else None
+                    entry = _build_entry(display_index, title, url, transcript_text)
+                    entry_words = _estimate_word_count(entry)
+                    if existing_path:
+                        filename = existing_path
+                        part_num = existing_part or 1
+                    else:
+                        filename, part_num = _choose_source_file(
+                            output_dir, base_name, entry_words, file_counts, target_words
+                        )
+                    header = _build_source_header(source_name, part_num)
                     action = _replace_entry_in_file(filename, header, url, entry)
-                    df.at[index, CHECK_COLUMN] = "[x]"
-                    df.to_csv(csv_file, index=False)
+                    file_counts[filename] = _read_file_word_count(filename)
+                    done_urls.add(url)
                     success_count += 1
                     total_input_tokens += input_tokens
                     total_output_tokens += output_tokens
@@ -815,6 +1014,9 @@ def main():
                     fail_count += 1
                     print("⚠️  單支補跑失敗，未改寫原本內容")
 
+                df.at[index, CHECK_COLUMN] = mark
+                df.to_csv(csv_file, index=False)
+
                 _write_log_row(
                     log_path,
                     {
@@ -827,7 +1029,7 @@ def main():
                         "CSV行號": index + 1,
                         "影片標題": title,
                         "影片連結": url,
-                        "寫入檔名": filename,
+                        "寫入檔名": filename if not is_error else "",
                         "完成狀態": "成功" if not is_error else "失敗",
                         "使用Key類型": KEY_PROFILE,
                         "中斷原因": "",
@@ -914,196 +1116,178 @@ def main():
         )
         return
 
-    # 分批處理
-    for i in range(0, total_videos, batch_size):
+    iterator = df.iterrows() if use_csv else enumerate(url_inputs)
+    for index, row in iterator:
         if STOP_REQUESTED and not stop_reason:
             stop_reason = "使用者中斷（Ctrl+C）"
             break
-        batch_num = (i // batch_size) + 1
-
-        batch_df = df.iloc[i : i + batch_size]
-        # 建立檔名
-        filename = os.path.join(output_dir, f"易學基地頻道_影片逐字稿_Part_{batch_num}.md")
-        if os.path.exists(filename) and not OVERWRITE:
-            existing_count = _count_entries(filename)
-            if existing_count >= len(batch_df):
-                print(f"略過 {filename} (已存在且完整，設 OVERWRITE=1 可覆寫)")
-                continue
-        else:
-            existing_count = 0
-
-        print(f"正在製作 {filename} (進度: {min(i+batch_size, total_videos)}/{total_videos})...")
-
-        file_mode = "w"
-        if os.path.exists(filename) and not OVERWRITE:
-            file_mode = "a"
-        with open(filename, file_mode, encoding="utf-8") as f:
-            if file_mode == "w":
-                f.write(f"# 易學基地頻道 影片逐字稿 Part {batch_num}\n")
-                f.write(f"**範圍：影片 {i+1:03d} - {min(i+batch_size, total_videos):03d}**\n\n---\n\n")
-
-            for local_idx, (index, row) in enumerate(batch_df.iterrows()):
-                if STOP_REQUESTED and not stop_reason:
-                    stop_reason = "使用者中斷（Ctrl+C）"
-                    break
-                if local_idx < existing_count:
-                    continue
-                if _is_checked(row.get(CHECK_COLUMN, "")):
-                    continue
-                if max_new is not None and processed_new >= max_new:
-                    break
-
-                title = str(row["Title"]).strip()
-                url = str(row["URL"]).strip()
-                serial = row.get("序號", "")
-                video_start = time.monotonic()
-                print(f"  - 處理中: {title[:30]}...")
-
-                try:
-                    transcript_text, stats = get_transcript_text(url, session)
-                except FreeTierLimitError as e:
-                    stop_reason = str(e)
-                    video_elapsed = int(time.monotonic() - video_start)
-                    _write_log_row(
-                        log_path,
-                        {
-                            "工作階段ID": run_id,
-                            "層級": "影片",
-                            "開始時間": run_start,
-                            "結束時間": datetime.now().isoformat(timespec="seconds"),
-                            "耗時(秒)": video_elapsed,
-                            "影片序號": serial,
-                            "CSV行號": index + 1,
-                            "影片標題": title,
-                            "影片連結": url,
-                            "寫入檔名": filename,
-                            "完成狀態": "中斷",
-                            "使用Key類型": KEY_PROFILE,
-                            "中斷原因": stop_reason,
-                            "錯誤訊息": stop_reason,
-                            "輸入Token數": 0,
-                            "輸出Token數": 0,
-                            "總Token數": 0,
-                            "預估成本(USD)": "",
-                            "API呼叫次數": 0,
-                            "續寫次數": 0,
-                            "重試次數": 0,
-                            "Timeout重試次數": 0,
-                            "Finish原因": "",
-                            "模型名稱": GEMINI_MODEL,
-                            "媒體解析度": GEMINI_MEDIA_RESOLUTION,
-                            "最大輸出Token": GEMINI_MAX_OUTPUT_TOKENS,
-                            "超時秒數": GEMINI_TIMEOUT,
-                            "每次間隔秒數": SLEEP_BETWEEN_CALLS,
-                            "本次成功影片數": "",
-                            "本次失敗影片數": "",
-                            "本次總輸入Token": "",
-                            "本次總輸出Token": "",
-                            "本次總Token": "",
-                            "本次總預估成本(USD)": "",
-                        },
-                    )
-                    print(f"⛔️ {stop_reason}")
-                    break
-
-                f.write(f"## {index + 1}. {title}\n")
-                f.write(f"* **影片連結**: {url}\n")
-                f.write("* **逐字稿**:\n")
-
-                if MERGE_LINES and not transcript_text.startswith("["):
-                    transcript_text = _merge_transcript_lines(transcript_text)
-
-                formatted_text = "\n".join(
-                    [f"    > {line}" for line in transcript_text.splitlines()]
-                )
-                f.write(formatted_text)
-                f.write("\n\n---\n\n")
-                f.flush()
-
-                is_error = (
-                    transcript_text.startswith("[無法獲取逐字稿")
-                    or transcript_text.startswith("[錯誤")
-                )
-                input_tokens = stats.get("input_tokens", 0)
-                output_tokens = stats.get("output_tokens", 0)
-                video_total_tokens = stats.get("total_tokens", 0)
-                api_calls = stats.get("api_calls", 0)
-                continuations = stats.get("continuations", 0)
-                retries = stats.get("retries", 0)
-                timeout_retries = stats.get("timeout_retries", 0)
-                finish_reason = stats.get("finish_reason", "")
-                video_elapsed = int(time.monotonic() - video_start)
-                cost = _estimate_cost(input_tokens, output_tokens)
-
-                if not is_error:
-                    df.at[index, CHECK_COLUMN] = "[x]"
-                    df.to_csv(csv_file, index=False)
-                    processed_new += 1
-                    success_count += 1
-                    total_input_tokens += input_tokens
-                    total_output_tokens += output_tokens
-                    total_tokens += video_total_tokens
-                    if cost is None:
-                        total_cost_known = False
-                    else:
-                        total_cost += cost
-                else:
-                    fail_count += 1
-                    print("⚠️  本支未成功，稍後可重跑補上")
-
-                _write_log_row(
-                    log_path,
-                    {
-                        "工作階段ID": run_id,
-                        "層級": "影片",
-                        "開始時間": run_start,
-                        "結束時間": datetime.now().isoformat(timespec="seconds"),
-                        "耗時(秒)": video_elapsed,
-                        "影片序號": serial,
-                        "CSV行號": index + 1,
-                        "影片標題": title,
-                        "影片連結": url,
-                        "寫入檔名": filename,
-                        "完成狀態": "成功" if not is_error else "失敗",
-                        "使用Key類型": KEY_PROFILE,
-                        "中斷原因": "",
-                        "錯誤訊息": "" if not is_error else transcript_text[:200],
-                        "輸入Token數": input_tokens,
-                        "輸出Token數": output_tokens,
-                        "總Token數": video_total_tokens,
-                        "預估成本(USD)": f"{cost:.6f}" if cost is not None else "",
-                        "API呼叫次數": api_calls,
-                        "續寫次數": continuations,
-                        "重試次數": retries,
-                        "Timeout重試次數": timeout_retries,
-                        "Finish原因": finish_reason,
-                        "模型名稱": GEMINI_MODEL,
-                        "媒體解析度": GEMINI_MEDIA_RESOLUTION,
-                        "最大輸出Token": GEMINI_MAX_OUTPUT_TOKENS,
-                        "超時秒數": GEMINI_TIMEOUT,
-                        "每次間隔秒數": SLEEP_BETWEEN_CALLS,
-                        "本次成功影片數": "",
-                        "本次失敗影片數": "",
-                        "本次總輸入Token": "",
-                        "本次總輸出Token": "",
-                        "本次總Token": "",
-                        "本次總預估成本(USD)": "",
-                    },
-                )
-                time.sleep(SLEEP_BETWEEN_CALLS)
-
-            if stop_reason:
-                break
-            if max_new is not None and processed_new >= max_new:
-                print("已達本次處理上限。")
-                break
-
-        if stop_reason:
-            break
-        print(f"\n✅ {filename} 完成！")
-
         if max_new is not None and processed_new >= max_new:
             break
+
+        if use_csv:
+            row_data = row
+            title = str(row_data.get("Title", "")).strip()
+            url = str(row_data.get("URL", "")).strip()
+            serial = row_data.get("序號", "")
+            check_value = row_data.get(CHECK_COLUMN, "")
+            if _is_checked(check_value):
+                continue
+            if url in done_urls:
+                df.at[index, CHECK_COLUMN] = _normalize_checkbox(check_value, True)
+                df.to_csv(csv_file, index=False)
+                continue
+            source_name = str(row_data.get(NOTEBOOK_SOURCE_COLUMN, "")).strip() or SOURCE_NAME
+            if not source_name:
+                print(f"⚠️  跳過：序號 {serial} 缺少 NotebookSource")
+                df.at[index, CHECK_COLUMN] = "✖"
+                df.to_csv(csv_file, index=False)
+                fail_count += 1
+                continue
+            display_index = int(serial) if str(serial).isdigit() else None
+        else:
+            url = row
+            if url in done_urls:
+                continue
+            title = _fetch_youtube_title(url, session)
+            serial = ""
+            source_name = SOURCE_NAME
+            display_index = None
+
+        video_start = time.monotonic()
+        print(f"  - 處理中: {title[:30]}...")
+
+        try:
+            transcript_text, stats = get_transcript_text(url, session)
+        except FreeTierLimitError as e:
+            stop_reason = str(e)
+            video_elapsed = int(time.monotonic() - video_start)
+            _write_log_row(
+                log_path,
+                {
+                    "工作階段ID": run_id,
+                    "層級": "影片",
+                    "開始時間": run_start,
+                    "結束時間": datetime.now().isoformat(timespec="seconds"),
+                    "耗時(秒)": video_elapsed,
+                    "影片序號": serial,
+                    "CSV行號": index + 1 if use_csv else "",
+                    "影片標題": title,
+                    "影片連結": url,
+                    "寫入檔名": "",
+                    "完成狀態": "中斷",
+                    "使用Key類型": KEY_PROFILE,
+                    "中斷原因": stop_reason,
+                    "錯誤訊息": stop_reason,
+                    "輸入Token數": 0,
+                    "輸出Token數": 0,
+                    "總Token數": 0,
+                    "預估成本(USD)": "",
+                    "API呼叫次數": 0,
+                    "續寫次數": 0,
+                    "重試次數": 0,
+                    "Timeout重試次數": 0,
+                    "Finish原因": "",
+                    "模型名稱": GEMINI_MODEL,
+                    "媒體解析度": GEMINI_MEDIA_RESOLUTION,
+                    "最大輸出Token": GEMINI_MAX_OUTPUT_TOKENS,
+                    "超時秒數": GEMINI_TIMEOUT,
+                    "每次間隔秒數": SLEEP_BETWEEN_CALLS,
+                    "本次成功影片數": "",
+                    "本次失敗影片數": "",
+                    "本次總輸入Token": "",
+                    "本次總輸出Token": "",
+                    "本次總Token": "",
+                    "本次總預估成本(USD)": "",
+                },
+            )
+            print(f"⛔️ {stop_reason}")
+            break
+
+        if MERGE_LINES and not transcript_text.startswith("["):
+            transcript_text = _merge_transcript_lines(transcript_text)
+
+        input_tokens = stats.get("input_tokens", 0)
+        output_tokens = stats.get("output_tokens", 0)
+        video_total_tokens = stats.get("total_tokens", 0)
+        api_calls = stats.get("api_calls", 0)
+        continuations = stats.get("continuations", 0)
+        retries = stats.get("retries", 0)
+        timeout_retries = stats.get("timeout_retries", 0)
+        finish_reason = stats.get("finish_reason", "")
+        video_elapsed = int(time.monotonic() - video_start)
+        cost = _estimate_cost(input_tokens, output_tokens)
+        mark, is_error = _mark_from_result(transcript_text, finish_reason)
+        filename = ""
+
+        if not is_error:
+            entry = _build_entry(display_index, title, url, transcript_text)
+            entry_words = _estimate_word_count(entry)
+            base_name = _sanitize_source_name(source_name)
+            filename, part_num = _choose_source_file(
+                output_dir, base_name, entry_words, file_counts, target_words
+            )
+            header = _build_source_header(source_name, part_num)
+            action = _append_entry(filename, header, entry)
+            file_counts[filename] = file_counts.get(filename, 0) + entry_words
+            done_urls.add(url)
+            processed_new += 1
+            success_count += 1
+            total_input_tokens += input_tokens
+            total_output_tokens += output_tokens
+            total_tokens += video_total_tokens
+            if cost is None:
+                total_cost_known = False
+            else:
+                total_cost += cost
+            print(f"✅ 已寫入 {filename} ({action})")
+        else:
+            fail_count += 1
+            print("⚠️  本支未成功，稍後可重跑補上")
+
+        if use_csv:
+            df.at[index, CHECK_COLUMN] = mark
+            df.to_csv(csv_file, index=False)
+
+        _write_log_row(
+            log_path,
+            {
+                "工作階段ID": run_id,
+                "層級": "影片",
+                "開始時間": run_start,
+                "結束時間": datetime.now().isoformat(timespec="seconds"),
+                "耗時(秒)": video_elapsed,
+                "影片序號": serial,
+                "CSV行號": index + 1 if use_csv else "",
+                "影片標題": title,
+                "影片連結": url,
+                "寫入檔名": filename if not is_error else "",
+                "完成狀態": "成功" if not is_error else "失敗",
+                "使用Key類型": KEY_PROFILE,
+                "中斷原因": "",
+                "錯誤訊息": "" if not is_error else transcript_text[:200],
+                "輸入Token數": input_tokens,
+                "輸出Token數": output_tokens,
+                "總Token數": video_total_tokens,
+                "預估成本(USD)": f"{cost:.6f}" if cost is not None else "",
+                "API呼叫次數": api_calls,
+                "續寫次數": continuations,
+                "重試次數": retries,
+                "Timeout重試次數": timeout_retries,
+                "Finish原因": finish_reason,
+                "模型名稱": GEMINI_MODEL,
+                "媒體解析度": GEMINI_MEDIA_RESOLUTION,
+                "最大輸出Token": GEMINI_MAX_OUTPUT_TOKENS,
+                "超時秒數": GEMINI_TIMEOUT,
+                "每次間隔秒數": SLEEP_BETWEEN_CALLS,
+                "本次成功影片數": "",
+                "本次失敗影片數": "",
+                "本次總輸入Token": "",
+                "本次總輸出Token": "",
+                "本次總Token": "",
+                "本次總預估成本(USD)": "",
+            },
+        )
+        time.sleep(SLEEP_BETWEEN_CALLS)
 
     elapsed = int(time.monotonic() - start_time)
     hours = elapsed // 3600
@@ -1112,7 +1296,7 @@ def main():
     if stop_reason:
         print(f"\n⛔️ 已中斷：{stop_reason}")
     else:
-        print("\n全部任務完成！所有文件已生成。")
+        print("\n全部任務完成！")
     print(f"本次執行耗時：{hours}h {minutes}m {seconds}s")
     print(f"本次輸入Token：{total_input_tokens}")
     print(f"本次輸出Token：{total_output_tokens}")

@@ -65,6 +65,7 @@ SOURCE_NAME="八字" URLS="https://youtu.be/AAA https://youtu.be/BBB" \
 已提供 `.skill` 發佈檔：
 
 - `dist/yt-transcript.skill`
+- `yt-transcript.skill`（同一份副本，方便直接下載）
 
 如需自行重新打包，可使用 Agent Skills 參考工具：
 
@@ -72,6 +73,26 @@ SOURCE_NAME="八字" URLS="https://youtu.be/AAA https://youtu.be/BBB" \
 python3 ~/.codex/skills/.system/skill-creator/scripts/package_skill.py \
   /Users/jw-mba/Projects/Active/yt-transcript/skills/yt-transcript \
   /Users/jw-mba/Projects/Active/yt-transcript/dist
+```
+
+## 安裝 `.skill`（範例）
+
+```bash
+# Codex（全域）
+mkdir -p ~/.codex/skills
+unzip -q yt-transcript.skill -d ~/.codex/skills
+
+# Cursor（專案）
+mkdir -p .cursor/skills
+unzip -q yt-transcript.skill -d .cursor/skills
+
+# Claude Code（專案）
+mkdir -p .claude/skills
+unzip -q yt-transcript.skill -d .claude/skills
+
+# Antigravity（專案）
+mkdir -p .agent/skills
+unzip -q yt-transcript.skill -d .agent/skills
 ```
 
 ## License

@@ -58,12 +58,14 @@ SOURCE_NAME="LLM" URLS_FILE="/path/to/urls.txt" \
 - `SOURCE_NAME`：URL 模式時的來源名稱
 - `NOTEBOOK_SOURCE_COLUMN`：CSV 裡的來源欄位名稱（預設 `NotebookSource`）
 - `NOTEBOOKLM_MAX_WORDS`：單一來源上限（預設 500000 words）
-- `NOTEBOOKLM_TARGET_RATIO`：保守比例（預設 0.8）
+- `NOTEBOOKLM_TARGET_RATIO`：保守比例（預設 0.6）
 - `MAX_VIDEOS`：這次只跑 N 支
 - `RETRY_INDEX`：單支補跑（CSV 的序號）
-- `GEMINI_MODEL`：指定模型
+- `GEMINI_MODEL`：指定模型（預設 `gemini-2.5-flash`）
 - `GEMINI_MEDIA_RESOLUTION`：影片解析度（LOW/MEDIUM/HIGH）
 - `MERGE_LINES`：合併短行（1=開）
+- `INPUT_PRICE_PER_M`：每 1M tokens 的輸入成本估算（USD）
+- `OUTPUT_PRICE_PER_M`：每 1M tokens 的輸出成本估算（USD）
 
 ## 常見問題
 

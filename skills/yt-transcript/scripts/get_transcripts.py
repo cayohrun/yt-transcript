@@ -17,7 +17,7 @@ def _handle_sigint(signum, frame):
     STOP_REQUESTED = True
 
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192"))
 GEMINI_MAX_CONTINUATIONS = int(os.getenv("GEMINI_MAX_CONTINUATIONS", "3"))
@@ -34,8 +34,8 @@ KEY_PROFILE_RAW = os.getenv("GEMINI_KEY_PROFILE", "").strip().lower()
 KEY_PROFILE = KEY_PROFILE_RAW
 LOG_DIR = os.getenv("LOG_DIR", "logs")
 LOG_FILE = os.getenv("LOG_FILE", "run_log.csv")
-INPUT_PRICE_PER_M = os.getenv("INPUT_PRICE_PER_M", "0.10")  # 2026-01-15
-OUTPUT_PRICE_PER_M = os.getenv("OUTPUT_PRICE_PER_M", "0.40")  # 2026-01-15
+INPUT_PRICE_PER_M = os.getenv("INPUT_PRICE_PER_M", "0.30")  # gemini-2.5-flash (text/image/video), 2026-01-16
+OUTPUT_PRICE_PER_M = os.getenv("OUTPUT_PRICE_PER_M", "2.50")  # gemini-2.5-flash, 2026-01-16
 GEMINI_MEDIA_RESOLUTION_RAW = os.getenv("GEMINI_MEDIA_RESOLUTION", "")
 PROMPT_FILE = os.getenv("PROMPT_FILE", "prompt.txt")
 MERGE_LINES = os.getenv("MERGE_LINES", "1") == "1"
@@ -43,7 +43,7 @@ RETRY_INDEX_RAW = os.getenv("RETRY_INDEX", "").strip()
 NOTEBOOK_SOURCE_COLUMN = os.getenv("NOTEBOOK_SOURCE_COLUMN", "NotebookSource")
 SOURCE_NAME = os.getenv("SOURCE_NAME", "").strip()
 NOTEBOOKLM_MAX_WORDS = int(os.getenv("NOTEBOOKLM_MAX_WORDS", "500000"))
-NOTEBOOKLM_TARGET_RATIO = float(os.getenv("NOTEBOOKLM_TARGET_RATIO", "0.8"))
+NOTEBOOKLM_TARGET_RATIO = float(os.getenv("NOTEBOOKLM_TARGET_RATIO", "0.6"))
 URLS_RAW = os.getenv("URLS", "").strip()
 URLS_FILE = os.getenv("URLS_FILE", "").strip()
 
@@ -364,19 +364,21 @@ def _read_file_word_count(path):
 
 def _choose_source_file(output_dir, base_name, entry_words, file_counts, target_words):
     files = _list_source_files(output_dir, base_name)
-    for part_num, path in files:
-        count = file_counts.get(path)
-        if count is None:
-            count = _read_file_word_count(path)
-            file_counts[path] = count
-        if count + entry_words <= target_words:
-            return path, part_num
-    next_part = 1 if not files else max(p for p, _ in files) + 1
-    filename = (
-        f"{base_name}.md"
-        if next_part == 1
-        else f"{base_name}_part{next_part}.md"
-    )
+    if not files:
+        filename = f"{base_name}.md"
+        path = os.path.join(output_dir, filename)
+        file_counts[path] = 0
+        return path, 1
+
+    part_num, path = files[-1]
+    count = file_counts.get(path)
+    if count is None:
+        count = _read_file_word_count(path)
+        file_counts[path] = count
+    if count + entry_words <= target_words:
+        return path, part_num
+    next_part = part_num + 1
+    filename = f"{base_name}_part{next_part}.md"
     path = os.path.join(output_dir, filename)
     file_counts[path] = 0
     return path, next_part
@@ -535,6 +537,7 @@ def _call_gemini_with_retry(session, url, prompt, max_retries=GEMINI_MAX_RETRIES
     timeout_retries = 0
     empty_retries = 0
     server_retries = 0
+    rate_limit_warned = False
     while True:
         try:
             text, finish_reason, usage = _call_gemini(session, url, prompt)
@@ -582,6 +585,9 @@ def _call_gemini_with_retry(session, url, prompt, max_retries=GEMINI_MAX_RETRIES
             time.sleep(sleep_time)
         except Exception as e:
             attempt += 1
+            if not rate_limit_warned and _is_rate_limit_error(str(e), 0, ""):
+                print("⚠️  API 429：配額/速率限制已滿（可能是媒體配額或 TPM/RPM 上限）。")
+                rate_limit_warned = True
             if attempt >= max_retries:
                 raise
             sleep_time = min(60, 2 ** attempt)

@@ -6,7 +6,9 @@ __pycache__/
 logs/
 transcript/
 transcript_legacy/
+transcript_2/
 youtube_videos.csv
 測試-*.md
 dist/
+firebase-debug.log
 *.skill

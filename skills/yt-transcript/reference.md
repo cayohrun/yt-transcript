@@ -22,8 +22,10 @@
 - `NotebookSource`（若整份 CSV 都同一來源，可改用 `SOURCE_NAME`）
 
 腳本會自動新增：
-- `Checked`（✔ 正常 / △ MAX_TOKENS / ✖ 失敗）
+- `Checked`（✔ 已完成 / △ MAX_TOKENS / ✖ 失敗）
 - `序號`
+
+批次只會略過 `✔`；`△` 與 `✖` 會再跑。
 
 ### URL 模式
 
@@ -60,7 +62,7 @@ SOURCE_NAME="LLM" URLS_FILE="/path/to/urls.txt" \
 - `NOTEBOOKLM_MAX_WORDS`：單一來源上限（預設 500000 words）
 - `NOTEBOOKLM_TARGET_RATIO`：保守比例（預設 0.6）
 - `MAX_VIDEOS`：這次只跑 N 支
-- `RETRY_INDEX`：單支補跑（CSV 的序號）
+- `SINGLE_INDEX`：單支處理（CSV 的序號）
 - `GEMINI_MODEL`：指定模型（預設 `gemini-2.5-flash`）
 - `GEMINI_MEDIA_RESOLUTION`：影片解析度（LOW/MEDIUM/HIGH）
 - `MERGE_LINES`：合併短行（1=開）

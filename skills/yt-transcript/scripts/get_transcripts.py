@@ -39,7 +39,7 @@ OUTPUT_PRICE_PER_M = os.getenv("OUTPUT_PRICE_PER_M", "2.50")  # gemini-2.5-flash
 GEMINI_MEDIA_RESOLUTION_RAW = os.getenv("GEMINI_MEDIA_RESOLUTION", "")
 PROMPT_FILE = os.getenv("PROMPT_FILE", "prompt.txt")
 MERGE_LINES = os.getenv("MERGE_LINES", "1") == "1"
-RETRY_INDEX_RAW = os.getenv("RETRY_INDEX", "").strip()
+SINGLE_INDEX_RAW = os.getenv("SINGLE_INDEX", "").strip()
 NOTEBOOK_SOURCE_COLUMN = os.getenv("NOTEBOOK_SOURCE_COLUMN", "NotebookSource")
 SOURCE_NAME = os.getenv("SOURCE_NAME", "").strip()
 NOTEBOOKLM_MAX_WORDS = int(os.getenv("NOTEBOOKLM_MAX_WORDS", "500000"))
@@ -339,11 +339,41 @@ def _build_source_header(source_name, part_num):
     return f"# {source_name}{suffix}\n\n---\n\n"
 
 
+def _build_part1_header(source_name):
+    return f"# {source_name} Part 1\n\n---\n\n"
+
+
+def _rewrite_header(path, header):
+    try:
+        content = ""
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except FileNotFoundError:
+        return
+    if not content:
+        return
+    marker = "\n---\n"
+    if content.startswith("# "):
+        idx = content.find(marker)
+        if idx != -1:
+            end = idx + len(marker)
+            if content[end:end + 1] == "\n":
+                end += 1
+            content = header + content[end:]
+        else:
+            content = header + content
+    else:
+        content = header + content
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
 def _list_source_files(output_dir, base_name):
     files = []
     base_file = f"{base_name}.md"
     base_path = os.path.join(output_dir, base_file)
-    if os.path.exists(base_path):
+    part1_path = os.path.join(output_dir, f"{base_name}_part1.md")
+    if os.path.exists(base_path) and not os.path.exists(part1_path):
         files.append((1, base_path))
     part_re = re.compile(rf"^{re.escape(base_name)}_part(\\d+)\\.md$", re.IGNORECASE)
     for name in os.listdir(output_dir):
@@ -354,6 +384,147 @@ def _list_source_files(output_dir, base_name):
     return sorted(files, key=lambda item: item[0])
 
 
+def _has_part2_files(output_dir, base_name):
+    part_re = re.compile(rf"^{re.escape(base_name)}_part(\\d+)\\.md$", re.IGNORECASE)
+    for name in os.listdir(output_dir):
+        match = part_re.match(name)
+        if match and int(match.group(1)) >= 2:
+            return True
+    return False
+
+
+def _parse_entries(content):
+    lines = content.splitlines(keepends=True)
+    entries = []
+    current = []
+    for line in lines:
+        if line.startswith("## "):
+            if current:
+                entries.append("".join(current))
+                current = []
+            current.append(line)
+        elif line.strip() == "---":
+            if current:
+                entries.append("".join(current))
+                current = []
+        else:
+            if current:
+                current.append(line)
+    if current:
+        entries.append("".join(current))
+    return entries
+
+
+def _entry_meta(entry_text):
+    lines = entry_text.splitlines(keepends=True)
+    if not lines:
+        return None, ""
+    match = re.match(r"^##\s+(\d+)\.\s+(.*)$", lines[0].rstrip("\n"))
+    serial = int(match.group(1)) if match else None
+    url = ""
+    for line in lines:
+        if line.startswith("* **影片連結**:"):
+            url = line.split(":", 1)[1].strip()
+            break
+    return serial, url
+
+
+def _load_source_entries(output_dir, base_name):
+    entries = []
+    for part_num, path in _list_source_files(output_dir, base_name):
+        try:
+            content = open(path, "r", encoding="utf-8").read()
+        except FileNotFoundError:
+            continue
+        for entry_text in _parse_entries(content):
+            serial, url = _entry_meta(entry_text)
+            if serial is None:
+                continue
+            entries.append(
+                {"serial": serial, "url": url, "text": entry_text, "part_num": part_num}
+            )
+    return entries
+
+
+def _write_source_entries(output_dir, base_name, source_name, entries, target_words):
+    limit = target_words
+    parts = []
+    current = []
+
+    def header_for_part(part_num, multi):
+        if multi and part_num == 1:
+            return _build_part1_header(source_name)
+        return _build_source_header(source_name, part_num)
+
+    header_words = _estimate_word_count(_build_part1_header(source_name))
+    current_words = header_words
+
+    for entry in entries:
+        words = _estimate_word_count(entry["text"])
+        if current and current_words + words > limit:
+            parts.append(current)
+            current = []
+            current_words = header_words
+        current.append(entry)
+        current_words += words
+
+    if current:
+        parts.append(current)
+
+    written = []
+    multi = len(parts) > 1
+    for idx, part_entries in enumerate(parts, start=1):
+        header = header_for_part(idx, multi)
+        chunks = [header]
+        for entry in part_entries:
+            text = entry["text"]
+            if not text.endswith("\n"):
+                text += "\n"
+            chunks.append(text)
+            chunks.append("---\n\n")
+        filename = (
+            f"{base_name}.md"
+            if idx == 1 and not multi
+            else f"{base_name}_part{idx}.md"
+        )
+        path = os.path.join(output_dir, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("".join(chunks))
+        written.append(path)
+
+    for part_num, path in _list_source_files(output_dir, base_name):
+        if path not in written:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+    if multi:
+        base_path = os.path.join(output_dir, f"{base_name}.md")
+        if base_path not in written and os.path.exists(base_path):
+            try:
+                os.remove(base_path)
+            except FileNotFoundError:
+                pass
+    return written
+
+
+def _upsert_entry_sorted(output_dir, base_name, source_name, entry_text, serial, url, target_words):
+    entries = _load_source_entries(output_dir, base_name)
+    replaced = False
+    for entry in entries:
+        if entry["url"] == url and url:
+            entry["text"] = entry_text
+            entry["serial"] = serial
+            replaced = True
+            break
+    if not replaced:
+        entries.append({"serial": serial, "url": url, "text": entry_text})
+
+    entries.sort(key=lambda item: (item["serial"] is None, item["serial"] or 0))
+    _write_source_entries(output_dir, base_name, source_name, entries, target_words)
+    return "replaced" if replaced else "inserted"
+
+
 def _read_file_word_count(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -362,7 +533,18 @@ def _read_file_word_count(path):
         return 0
 
 
-def _choose_source_file(output_dir, base_name, entry_words, file_counts, target_words):
+def _ensure_part1_suffix(output_dir, base_name, source_name, file_counts):
+    base_path = os.path.join(output_dir, f"{base_name}.md")
+    part1_path = os.path.join(output_dir, f"{base_name}_part1.md")
+    if os.path.exists(base_path) and not os.path.exists(part1_path):
+        os.rename(base_path, part1_path)
+        _rewrite_header(part1_path, _build_part1_header(source_name))
+        if base_path in file_counts:
+            file_counts[part1_path] = file_counts.pop(base_path)
+    return part1_path
+
+
+def _choose_source_file(output_dir, base_name, source_name, entry_words, file_counts, target_words):
     files = _list_source_files(output_dir, base_name)
     if not files:
         filename = f"{base_name}.md"
@@ -377,6 +559,8 @@ def _choose_source_file(output_dir, base_name, entry_words, file_counts, target_
         file_counts[path] = count
     if count + entry_words <= target_words:
         return path, part_num
+    if part_num == 1 and os.path.basename(path) == f"{base_name}.md":
+        _ensure_part1_suffix(output_dir, base_name, source_name, file_counts)
     next_part = part_num + 1
     filename = f"{base_name}_part{next_part}.md"
     path = os.path.join(output_dir, filename)
@@ -715,7 +899,7 @@ def get_transcript_text(url, session):
 
 def _is_checked(value):
     text = str(value).strip().lower()
-    return text in {"[x]", "x", "✓", "✔", "✅", "true", "1", "yes", "v", "△", "✖"}
+    return text in {"[x]", "x", "✓", "✔", "✅", "true", "1", "yes", "v"}
 
 
 def _normalize_checkbox(value, checked):
@@ -852,7 +1036,7 @@ def main():
             c for c in df.columns if c not in ("序號", CHECK_COLUMN)
         ]
         df = df[cols]
-        df["序號"] = range(1, len(df) + 1)
+        df["序號"] = range(len(df), 0, -1)
 
         source_names = set(df[NOTEBOOK_SOURCE_COLUMN].tolist())
         done_urls = _load_done_urls(output_dir, source_names)
@@ -894,28 +1078,33 @@ def main():
     total_cost = 0.0
     total_cost_known = True
     stop_reason = ""
-    retry_index = None
+    single_index = None
     file_counts = {}
+    if os.path.isdir(output_dir):
+        for name in source_names:
+            base_name = _sanitize_source_name(name)
+            if _has_part2_files(output_dir, base_name):
+                _ensure_part1_suffix(output_dir, base_name, name, file_counts)
 
-    if RETRY_INDEX_RAW:
+    if SINGLE_INDEX_RAW:
         try:
-            retry_index = int(RETRY_INDEX_RAW)
-            if retry_index <= 0:
+            single_index = int(SINGLE_INDEX_RAW)
+            if single_index <= 0:
                 raise ValueError
         except ValueError:
-            print("錯誤：RETRY_INDEX 必須是正整數。")
+            print("錯誤：SINGLE_INDEX 必須是正整數。")
             return
 
-    if retry_index is not None:
+    if single_index is not None:
         if not use_csv:
-            print("錯誤：RETRY_INDEX 只能搭配 CSV 模式使用。")
+            print("錯誤：SINGLE_INDEX 只能搭配 CSV 模式使用。")
             return
         if STOP_REQUESTED:
             stop_reason = "使用者中斷（Ctrl+C）"
         else:
-            match = df[df["序號"] == retry_index]
+            match = df[df["序號"] == single_index]
             if match.empty:
-                print(f"錯誤：找不到序號 {retry_index} 的影片。")
+                print(f"錯誤：找不到序號 {single_index} 的影片。")
                 return
             index = match.index[0]
             row = match.iloc[0]
@@ -930,7 +1119,7 @@ def main():
             )
 
             video_start = time.monotonic()
-            print(f"單支補跑：序號 {retry_index} - {title[:30]}...")
+            print(f"單支處理：序號 {single_index} - {title[:30]}...")
             try:
                 transcript_text, stats = get_transcript_text(url, session)
             except FreeTierLimitError as e:
@@ -999,13 +1188,24 @@ def main():
                     if existing_path:
                         filename = existing_path
                         part_num = existing_part or 1
+                        header = _build_source_header(source_name, part_num)
+                        action = _replace_entry_in_file(filename, header, url, entry)
                     else:
-                        filename, part_num = _choose_source_file(
-                            output_dir, base_name, entry_words, file_counts, target_words
+                        action = _upsert_entry_sorted(
+                            output_dir,
+                            base_name,
+                            source_name,
+                            entry,
+                            display_index,
+                            url,
+                            target_words,
                         )
-                    header = _build_source_header(source_name, part_num)
-                    action = _replace_entry_in_file(filename, header, url, entry)
-                    file_counts[filename] = _read_file_word_count(filename)
+                        filename, part_num = _find_source_file_with_url(
+                            output_dir, base_name, url
+                        )
+                        header = _build_source_header(source_name, part_num or 1)
+                    if filename:
+                        file_counts[filename] = _read_file_word_count(filename)
                     done_urls.add(url)
                     success_count += 1
                     total_input_tokens += input_tokens
@@ -1122,7 +1322,10 @@ def main():
         )
         return
 
-    iterator = df.iterrows() if use_csv else enumerate(url_inputs)
+    if use_csv:
+        iterator = df.iloc[::-1].iterrows()
+    else:
+        iterator = enumerate(url_inputs)
     for index, row in iterator:
         if STOP_REQUESTED and not stop_reason:
             stop_reason = "使用者中斷（Ctrl+C）"
@@ -1230,7 +1433,12 @@ def main():
             entry_words = _estimate_word_count(entry)
             base_name = _sanitize_source_name(source_name)
             filename, part_num = _choose_source_file(
-                output_dir, base_name, entry_words, file_counts, target_words
+                output_dir,
+                base_name,
+                source_name,
+                entry_words,
+                file_counts,
+                target_words,
             )
             header = _build_source_header(source_name, part_num)
             action = _append_entry(filename, header, entry)

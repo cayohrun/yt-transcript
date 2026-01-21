@@ -375,7 +375,7 @@ def _list_source_files(output_dir, base_name):
     part1_path = os.path.join(output_dir, f"{base_name}_part1.md")
     if os.path.exists(base_path) and not os.path.exists(part1_path):
         files.append((1, base_path))
-    part_re = re.compile(rf"^{re.escape(base_name)}_part(\\d+)\\.md$", re.IGNORECASE)
+    part_re = re.compile(rf"^{re.escape(base_name)}_part(\d+)\.md$", re.IGNORECASE)
     for name in os.listdir(output_dir):
         match = part_re.match(name)
         if match:
@@ -385,7 +385,7 @@ def _list_source_files(output_dir, base_name):
 
 
 def _has_part2_files(output_dir, base_name):
-    part_re = re.compile(rf"^{re.escape(base_name)}_part(\\d+)\\.md$", re.IGNORECASE)
+    part_re = re.compile(rf"^{re.escape(base_name)}_part(\d+)\.md$", re.IGNORECASE)
     for name in os.listdir(output_dir):
         match = part_re.match(name)
         if match and int(match.group(1)) >= 2:
